@@ -16,23 +16,91 @@ const sendEmailBtn = document.getElementById("sendEmailBtn");
 const clearCartBtn = document.getElementById("clearCart");
 const toastContainer = document.getElementById("toastContainer");
 
+// ==========================================
+// CONFIGURATION
+// ==========================================
 const API_URL = window.location.origin + "/search";
+const HEALTH_URL = window.location.origin + "/health";
 const WHATSAPP_NUMBER = "393355994614";
 const EMAIL_ADDRESS = "m.ballicu@sp-electric.it";
-let debounceTimer;
-let cart = loadCartFromStorage();
-let currentQuery = "";
+const SEARCH_MIN_LENGTH = 2;
+const SEARCH_DEBOUNCE_MS = 150;
+const MAX_RETRIES = 2;
 
-// Initialize app
+// ==========================================
+// APPLICATION STATE
+// ==========================================
+let appState = {
+  cart: [],
+  currentQuery: "",
+  debounceTimer: null,
+  searchInProgress: false,
+  backendHealthy: null
+};
+
+// ==========================================
+// DOM ELEMENTS (CACHED)
+// ==========================================
+const DOM = {
+  searchInput: document.getElementById("searchInput"),
+  clearSearchBtn: document.getElementById("clearSearch"),
+  resultsList: document.getElementById("resultsList"),
+  resultsMeta: document.getElementById("resultsMeta"),
+  searchHint: document.getElementById("searchHint"),
+  cartToggle: document.getElementById("cartToggle"),
+  cartPanel: document.getElementById("cartPanel"),
+  closeCartBtn: document.getElementById("closeCart"),
+  cartItems: document.getElementById("cartItems"),
+  cartBadge: document.getElementById("cartBadge"),
+  cartTotal: document.getElementById("cartTotal"),
+  totalAmount: document.getElementById("totalAmount"),
+  sendOrderBtn: document.getElementById("sendOrderBtn"),
+  sendEmailBtn: document.getElementById("sendEmailBtn"),
+  clearCartBtn: document.getElementById("clearCart"),
+  toastContainer: document.getElementById("toastContainer")
+};
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
 function init() {
+  appState.cart = loadCartFromStorage();
   renderCart();
   setupEventListeners();
+  checkBackendHealth();
 }
 
-// Local storage
+// ==========================================
+// BACKEND HEALTH CHECK (Fail-fast detection)
+// ==========================================
+async function checkBackendHealth() {
+  try {
+    const response = await fetch(HEALTH_URL, { 
+      method: 'GET',
+      timeout: 5000 
+    });
+    
+    if (response.ok) {
+      const health = await response.json();
+      appState.backendHealthy = health.status === "ok";
+      
+      if (!appState.backendHealthy) {
+        showToast("⚠️ Sistema in modalità degradata", "warning");
+        console.warn("Backend degraded:", health);
+      }
+    } else {
+      appState.backendHealthy = false;
+    }
+  } catch (error) {
+    appState.backendHealthy = false;
+    console.error("Health check failed:", error);
+  }
+}
+
+// Local storage (Fail-safe)
 function saveCartToStorage() {
   try {
-    localStorage.setItem("cart", JSON.stringify(cart));
+    localStorage.setItem("cart", JSON.stringify(appState.cart));
   } catch (error) {
     console.error("Errore salvataggio carrello:", error);
     showToast("Errore salvataggio carrello", "error");
@@ -95,7 +163,7 @@ function showToast(message, type = "info") {
     <span class="toast-message">${message}</span>
   `;
   
-  toastContainer.appendChild(toast);
+  DOM.toastContainer.appendChild(toast);
   
   setTimeout(() => toast.remove(), 3000);
 }
@@ -135,11 +203,11 @@ function highlightText(text, query) {
 
 // Render results
 function renderResults(items) {
-  resultsList.innerHTML = "";
+  DOM.resultsList.innerHTML = "";
 
   if (!items.length) {
-    resultsMeta.textContent = "Nessun risultato trovato";
-    resultsList.innerHTML = `
+    DOM.resultsMeta.textContent = "Nessun risultato trovato";
+    DOM.resultsList.innerHTML = `
       <div style="text-align:center;padding:60px 20px;">
         <div style="font-size:48px;margin-bottom:16px;">🔍</div>
         <p style="color:var(--gray-600);font-size:16px;margin:0;">Nessun prodotto corrisponde alla tua ricerca</p>
@@ -149,7 +217,7 @@ function renderResults(items) {
     return;
   }
 
-  resultsMeta.textContent = `${items.length} ${items.length === 1 ? 'prodotto trovato' : 'prodotti trovati'}`;
+  DOM.resultsMeta.textContent = `${items.length} ${items.length === 1 ? 'prodotto trovato' : 'prodotti trovati'}`;
 
   const { categoryOrder, grouped } = buildGroupedResults(items);
 
@@ -170,7 +238,7 @@ function renderResults(items) {
 
       const productTitle = document.createElement("div");
       productTitle.className = "product-title";
-      productTitle.innerHTML = highlightText(productName, currentQuery);
+      productTitle.innerHTML = highlightText(productName, appState.currentQuery);
 
       const productList = document.createElement("div");
       productList.className = "product-rows";
@@ -180,8 +248,8 @@ function renderResults(items) {
         rowEl.className = "product-row";
         
         // Evidenziazione codice e descrizione
-        const highlightedCode = highlightText(row.code || "", currentQuery);
-        const highlightedName = highlightText(row.name || "", currentQuery);
+        const highlightedCode = highlightText(row.code || "", appState.currentQuery);
+        const highlightedName = highlightText(row.name || "", appState.currentQuery);
         
         rowEl.innerHTML = `
           <span class="row-code">${highlightedCode}</span>
@@ -198,49 +266,76 @@ function renderResults(items) {
       categoryItem.appendChild(productBlock);
     });
 
-    resultsList.appendChild(categoryItem);
+    DOM.resultsList.appendChild(categoryItem);
   });
 }
 
-// Search
-async function performSearch(query) {
-  if (query.length < 2) {
-    resultsList.innerHTML = "";
-    resultsMeta.textContent = "Inizia a cercare";
-    searchHint.textContent = "Digita almeno 2 caratteri per cercare";
-    clearSearchBtn.style.display = "none";
-    currentQuery = "";
+// ==========================================
+// SEARCH (Fail-safe with retry)
+// ==========================================
+async function performSearch(query, retryCount = 0) {
+  if (query.length < SEARCH_MIN_LENGTH) {
+    DOM.resultsList.innerHTML = "";
+    DOM.resultsMeta.textContent = "Inizia a cercare";
+    DOM.searchHint.textContent = `Digita almeno ${SEARCH_MIN_LENGTH} caratteri per cercare`;
+    DOM.clearSearchBtn.style.display = "none";
+    appState.currentQuery = "";
     return;
   }
 
-  currentQuery = query;
-  clearSearchBtn.style.display = "block";
-  searchHint.textContent = "🔍 Ricerca in corso...";
-  resultsMeta.textContent = "Caricamento...";
+  appState.currentQuery = query;
+  appState.searchInProgress = true;
+  DOM.clearSearchBtn.style.display = "block";
+  DOM.searchHint.textContent = "🔍 Ricerca in corso...";
+  DOM.resultsMeta.textContent = "Caricamento...";
 
   try {
-    const response = await fetch(`${API_URL}?q=${encodeURIComponent(query)}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+    
+    const response = await fetch(`${API_URL}?q=${encodeURIComponent(query)}`, {
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
     
     if (!response.ok) {
+      // Handle 503 (service unavailable)
+      if (response.status === 503) {
+        const error = await response.json();
+        throw new Error(error.message || "Servizio temporaneamente non disponibile");
+      }
       throw new Error(`HTTP ${response.status}`);
     }
     
     const data = await response.json();
     renderResults(data.results || []);
-    searchHint.textContent = "";
+    DOM.searchHint.textContent = "";
+    appState.searchInProgress = false;
+    
   } catch (error) {
-    console.error("Errore di ricerca:", error);
-    resultsMeta.textContent = "Errore di connessione";
-    searchHint.innerHTML = `<span style="color:var(--danger);">❌ Impossibile connettersi al server. Verifica che il backend sia attivo.</span>`;
-    resultsList.innerHTML = `
+    console.error("Search failed:", error);
+    appState.searchInProgress = false;
+    
+    // Retry logic (only for network errors, not 503)
+    if (retryCount < MAX_RETRIES && error.name !== "AbortError") {
+      console.log(`Retrying search (${retryCount + 1}/${MAX_RETRIES})...`);
+      setTimeout(() => performSearch(query, retryCount + 1), 1000);
+      return;
+    }
+    
+    // Final failure
+    DOM.resultsMeta.textContent = "Errore di connessione";
+    DOM.searchHint.innerHTML = `<span style="color:var(--danger);">❌ ${error.message || "Impossibile connettersi al server"}</span>`;
+    DOM.resultsList.innerHTML = `
       <div style="text-align:center;padding:60px 20px;">
         <div style="font-size:48px;margin-bottom:16px;">⚠️</div>
         <p style="color:var(--danger);font-size:16px;margin:0;font-weight:600;">Errore di connessione</p>
-        <p style="color:var(--gray-600);font-size:14px;margin-top:8px;">Assicurati che il server backend sia avviato</p>
-        <button onclick="location.reload()" style="margin-top:20px;padding:12px 24px;background:var(--primary);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;">Riprova</button>
+        <p style="color:var(--gray-600);font-size:14px;margin-top:8px;">${error.message || "Verifica la tua connessione internet"}</p>
+        <button onclick="performSearch('${query.replace(/'/g, "\\'")}', 0)" style="margin-top:20px;padding:12px 24px;background:var(--primary);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;">Riprova</button>
       </div>
     `;
-    showToast("Errore di connessione al server", "error");
+    showToast("Errore di ricerca", "error");
   }
 }
 
@@ -252,14 +347,14 @@ function addToCart(code, description, price) {
     return;
   }
   
-  const existingItem = cart.find(item => item.code === code);
+  const existingItem = appState.cart.find(item => item.code === code);
   if (existingItem) {
     existingItem.quantity += 1;
     showToast(`Quantità aggiornata: ${code}`, "success");
   } else {
     // Estrai il prezzo numerico dalla stringa
     const priceValue = parseFloat(price.replace(/[^\d,.-]/g, '').replace(',', '.')) || 0;
-    cart.push({ 
+    appState.cart.push({ 
       code, 
       description, 
       price: price,
@@ -274,15 +369,15 @@ function addToCart(code, description, price) {
 }
 
 function removeFromCart(index) {
-  const removed = cart[index];
-  cart.splice(index, 1);
+  const removed = appState.cart[index];
+  appState.cart.splice(index, 1);
   saveCartToStorage();
   renderCart();
   showToast(`${removed.code} rimosso`, "info");
 }
 
 function updateQuantity(index, change) {
-  const item = cart[index];
+  const item = appState.cart[index];
   item.quantity += change;
   
   if (item.quantity <= 0) {
@@ -294,28 +389,28 @@ function updateQuantity(index, change) {
 }
 
 function calculateTotal() {
-  return cart.reduce((total, item) => {
+  return appState.cart.reduce((total, item) => {
     return total + (item.priceValue * item.quantity);
   }, 0);
 }
 
 function renderCart() {
-  const totalQuantity = cart.reduce((total, item) => total + item.quantity, 0);
-  cartBadge.textContent = totalQuantity;
+  const totalQuantity = appState.cart.reduce((total, item) => total + item.quantity, 0);
+  DOM.cartBadge.textContent = totalQuantity;
 
-  if (cart.length === 0) {
-    cartItems.innerHTML = `
+  if (appState.cart.length === 0) {
+    DOM.cartItems.innerHTML = `
       <div style="text-align:center;padding:40px 20px;">
         <div style="font-size:48px;margin-bottom:12px;opacity:0.3;">🛒</div>
         <p style="color:var(--gray-600);font-size:15px;margin:0;">Il carrello è vuoto</p>
         <p style="color:var(--gray-500);font-size:13px;margin-top:8px;">Aggiungi prodotti per iniziare</p>
       </div>
     `;
-    cartTotal.style.display = 'none';
+    DOM.cartTotal.style.display = 'none';
     return;
   }
 
-  cartItems.innerHTML = cart.map((item, index) => `
+  DOM.cartItems.innerHTML = appState.cart.map((item, index) => `
     <div class="cart-item">
       <div class="cart-item-info">
         <div style="font-weight: 600; color: #1f2937; font-family: 'Courier New', monospace; font-size: 13px;">${item.code}</div>
@@ -340,30 +435,30 @@ function renderCart() {
   
   const total = calculateTotal();
   if (total > 0) {
-    totalAmount.textContent = `€ ${total.toFixed(2).replace('.', ',')}`;
-    cartTotal.style.display = 'flex';
+    DOM.totalAmount.textContent = `€ ${total.toFixed(2).replace('.', ',')}`;
+    DOM.cartTotal.style.display = 'flex';
   } else {
-    cartTotal.style.display = 'none';
+    DOM.cartTotal.style.display = 'none';
   }
 }
 
 // Toggle cart panel
 function openCart() {
-  cartPanel.classList.add("open");
+  DOM.cartPanel.classList.add("open");
 }
 
 function closeCart() {
-  cartPanel.classList.remove("open");
+  DOM.cartPanel.classList.remove("open");
 }
 
 // Send via WhatsApp
 function sendOrderViaWhatsApp() {
-  if (cart.length === 0) {
+  if (appState.cart.length === 0) {
     showToast("Il carrello è vuoto", "warning");
     return;
   }
 
-  const items = cart.map((item) => 
+  const items = appState.cart.map((item) => 
     `- Codice: ${item.code} | Descrizione: ${item.description} | Q.tà: ${item.quantity}`
   ).join("\n");
   
@@ -377,7 +472,7 @@ function sendOrderViaWhatsApp() {
 
 // Send via Email
 function sendEmail() {
-  if (cart.length === 0) {
+  if (appState.cart.length === 0) {
     showToast("Il carrello è vuoto", "warning");
     return;
   }
@@ -389,7 +484,7 @@ function sendEmail() {
     year: 'numeric' 
   });
 
-  const items = cart.map((item) => 
+  const items = appState.cart.map((item) => 
     `- Codice: ${item.code} | Descrizione: ${item.description} | Q.tà: ${item.quantity}`
   ).join("\n");
   
@@ -404,34 +499,34 @@ function sendEmail() {
 // Event Listeners
 function setupEventListeners() {
   // Cart toggle
-  cartToggle.addEventListener("click", () => {
+  DOM.cartToggle.addEventListener("click", () => {
     openCart();
-    if (cart.length === 0) {
+    if (appState.cart.length === 0) {
       showToast("Aggiungi prodotti per creare un ordine", "info");
     }
   });
-  closeCartBtn.addEventListener("click", closeCart);
+  DOM.closeCartBtn.addEventListener("click", closeCart);
 
   // Search
-  searchInput.addEventListener("input", (event) => {
+  DOM.searchInput.addEventListener("input", (event) => {
     const value = event.target.value.trim();
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => performSearch(value), 150);
+    clearTimeout(appState.debounceTimer);
+    appState.debounceTimer = setTimeout(() => performSearch(value), SEARCH_DEBOUNCE_MS);
   });
 
   // Clear search
-  clearSearchBtn.addEventListener("click", () => {
-    searchInput.value = "";
-    currentQuery = "";
-    resultsList.innerHTML = "";
-    resultsMeta.textContent = "Inizia a cercare";
-    searchHint.textContent = "Digita almeno 2 caratteri per cercare";
-    clearSearchBtn.style.display = "none";
-    searchInput.focus();
+  DOM.clearSearchBtn.addEventListener("click", () => {
+    DOM.searchInput.value = "";
+    appState.currentQuery = "";
+    DOM.resultsList.innerHTML = "";
+    DOM.resultsMeta.textContent = "Inizia a cercare";
+    DOM.searchHint.textContent = "Digita almeno 2 caratteri per cercare";
+    DOM.clearSearchBtn.style.display = "none";
+    DOM.searchInput.focus();
   });
 
   // Add to cart
-  resultsList.addEventListener("click", (event) => {
+  DOM.resultsList.addEventListener("click", (event) => {
     if (event.target.classList.contains("add-to-cart-btn")) {
       const code = event.target.dataset.code;
       const desc = event.target.dataset.desc;
@@ -453,17 +548,17 @@ function setupEventListeners() {
   });
 
   // Actions
-  sendOrderBtn.addEventListener("click", sendOrderViaWhatsApp);
-  sendEmailBtn.addEventListener("click", sendEmail);
-  clearCartBtn.addEventListener("click", () => {
-    if (cart.length === 0) {
+  DOM.sendOrderBtn.addEventListener("click", sendOrderViaWhatsApp);
+  DOM.sendEmailBtn.addEventListener("click", sendEmail);
+  DOM.clearCartBtn.addEventListener("click", () => {
+    if (appState.cart.length === 0) {
       showToast("Il carrello è già vuoto", "info");
       return;
     }
     
-    const itemCount = cart.reduce((total, item) => total + item.quantity, 0);
+    const itemCount = appState.cart.reduce((total, item) => total + item.quantity, 0);
     if (confirm(`Vuoi svuotare il carrello?\n${itemCount} ${itemCount === 1 ? 'prodotto' : 'prodotti'} ${itemCount === 1 ? 'sarà rimosso' : 'saranno rimossi'}.`)) {
-      cart = [];
+      appState.cart = [];
       localStorage.removeItem("cart");
       renderCart();
       showToast("Carrello svuotato", "success");

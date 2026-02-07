@@ -451,18 +451,43 @@ function closeCart() {
   DOM.cartPanel.classList.remove("open");
 }
 
-// Send via WhatsApp
+// ==========================================
+// GENERATORE MESSAGGIO WHATSAPP PROFESSIONALE
+// ==========================================
 function sendOrderViaWhatsApp() {
   if (appState.cart.length === 0) {
     showToast("Il carrello è vuoto", "warning");
     return;
   }
 
-  const items = appState.cart.map((item) => 
-    `- Codice: ${item.code} | Descrizione: ${item.description} | Q.tà: ${item.quantity}`
-  ).join("\n");
+  // Genera lista prodotti con prezzi e subtotali
+  const items = appState.cart.map((item) => {
+    const subtotal = item.priceValue * item.quantity;
+    const priceFormatted = `€${item.priceValue.toFixed(2).replace('.', ',')}`;
+    const subtotalFormatted = `€${subtotal.toFixed(2).replace('.', ',')}`;
+    
+    return `- CODICE: ${item.code}
+  PRODOTTO: ${item.description}
+  Q.TÀ: ${item.quantity}
+  PREZZO: ${priceFormatted}
+  SUBTOTALE: ${subtotalFormatted}`;
+  }).join("\n\n");
   
-  const message = `Ciao Marco,\nquesti sono i prodotti che desidero ordinare:\n\n${items}\n\nGrazie.`;
+  // Calcola totale
+  const total = calculateTotal();
+  const totalFormatted = `€${total.toFixed(2).replace('.', ',')}`;
+  
+  // Messaggio finale
+  const message = `CIAO MARCO,
+
+QUESTO È IL MIO ORDINE:
+
+${items}
+
+TOTALE ORDINE: ${totalFormatted}
+
+GRAZIE`;
+  
   const encoded = encodeURIComponent(message);
   const url = `https://wa.me/${WHATSAPP_NUMBER}?text=${encoded}`;
 
@@ -470,7 +495,9 @@ function sendOrderViaWhatsApp() {
   showToast("Apertura WhatsApp in corso...", "success");
 }
 
-// Send via Email
+// ==========================================
+// GENERATORE EMAIL PROFESSIONALE CON TABELLA
+// ==========================================
 function sendEmail() {
   if (appState.cart.length === 0) {
     showToast("Il carrello è vuoto", "warning");
@@ -484,12 +511,40 @@ function sendEmail() {
     year: 'numeric' 
   });
 
-  const items = appState.cart.map((item) => 
-    `- Codice: ${item.code} | Descrizione: ${item.description} | Q.tà: ${item.quantity}`
-  ).join("\n");
+  // Genera tabella prodotti
+  const items = appState.cart.map((item) => {
+    const subtotal = item.priceValue * item.quantity;
+    const priceFormatted = `€${item.priceValue.toFixed(2).replace('.', ',')}`;
+    const subtotalFormatted = `€${subtotal.toFixed(2).replace('.', ',')}`;
+    
+    // Formato tabulare ottimizzato per email
+    const code = item.code.padEnd(15);
+    const desc = item.description.length > 40 ? item.description.substring(0, 37) + '...' : item.description.padEnd(40);
+    const qty = String(item.quantity).padStart(4);
+    const price = priceFormatted.padStart(10);
+    const sub = subtotalFormatted.padStart(12);
+    
+    return `${code} | ${desc} | ${qty} | ${price} | ${sub}`;
+  }).join("\n");
   
-  const subject = `Ordine prodotti – ${dateStr}`;
-  const body = `Ciao Marco,\nquesti sono i prodotti che desidero ordinare:\n\n${items}\n\nGrazie.`;
+  // Calcola totale
+  const total = calculateTotal();
+  const totalFormatted = `€${total.toFixed(2).replace('.', ',')}`;
+  
+  const subject = `ORDINE PRODOTTI – ${dateStr}`;
+  const body = `BUONGIORNO,
+
+DI SEGUITO L'ORDINE DEI PRODOTTI SELEZIONATI:
+
+CODICE          | PRODOTTO                                 | Q.TÀ |     PREZZO |    SUBTOTALE
+${'-'.repeat(110)}
+${items}
+${'-'.repeat(110)}
+TOTALE ORDINE: ${totalFormatted}
+
+RESTO IN ATTESA DI CONFERMA.
+
+CORDIALI SALUTI`;
   
   const mailtoLink = `mailto:${EMAIL_ADDRESS}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   window.location.href = mailtoLink;
